@@ -1,3 +1,8 @@
+/*
+
+
+
+ */
 #include "lpc17xx_pinsel.h"
 #include "lpc17xx_pwm.h"
 #include "lpc17xx_gpio.h"
@@ -11,73 +16,63 @@
 #define ANGULO_MAXIMO 180
 #define PASO_ANGULO 1 // Grados a aumentar o disminuir por iteración
 #define RETARDO_MS 20 // Retardo entre cambios de ángulo
-
+#define BUFFER_SIZE 2 // 2 valores del ADC
+uint16_t dmaBuffer[BUFFER_SIZE];  // Buffer DMA para almacenar los datos de ADC
 #define CANAL_ADC_BATERIA 0 // Canal ADC para el nivel de batería
 #define CANAL_ADC_TEMPERATURA 1 // Canal ADC para el LM35
 #define UART_BAUD_RATE 9600 // Tasa de baud para comunicación UART
 
-void configurarPWM(void);
-void establecerAnguloServo(uint8_t angulo);
-void configurarBoton(void);
-void retardo_ms(uint32_t ms);
-void configurarADC(void);
-void configurarUART(void);
-void configurarTemporizador(void);
-void configurarDMA(void);
+//void configurarPWM(void);
+//void establecerAnguloServo(uint8_t angulo);
+//void configurarBoton(void);
+//void retardo_ms(uint32_t ms);
+//void configurarADC(void);
+//void configurarUART(void);
+//void configurarTemporizador(void);
+//void configurarDMA(void);
 
-void TIMER0_IRQHandler(void) {
-    // Lee el nivel de batería y la temperatura
-    uint16_t nivelBateria = ADC_ChannelGetData(LPC_ADC, CANAL_ADC_BATERIA);
-    uint16_t nivelTemperatura = ADC_ChannelGetData(LPC_ADC, CANAL_ADC_TEMPERATURA);
+void configurarPWM() {
+    // Configuración del pin P2.0 como PWM1.1
+    PINSEL_CFG_Type PinConfig;
+    PinConfig.Funcnum = 1;       // Función PWM
+    PinConfig.OpenDrain = PINSEL_PINMODE_NORMAL;
+    PinConfig.Pinmode = PINSEL_PINMODE_PULLUP;
+    PinConfig.Portnum = 2;       // Puerto 2
+    PinConfig.Pinnum = 0;        // Pin 0
+    PINSEL_ConfigPin(&PinConfig);
 
-    // Transmite los datos vía UART
-    UART_Send(LPC_UART3, (uint8_t*)&nivelBateria, sizeof(nivelBateria), BLOCKING);
-    UART_Send(LPC_UART3, (uint8_t*)&nivelTemperatura, sizeof(nivelTemperatura), BLOCKING);
+    // Inicializar PWM
+    PWM_TIMERCFG_Type PWMConfig;
+    PWMConfig.PrescaleOption = PWM_TIMER_PRESCALE_USVAL; // Escala en microsegundos
+    PWMConfig.PrescaleValue = 1;                         // 1 µs
 
-    // Limpia la interrupción del temporizador
-    TIM_ClearIntPending(LPC_TIM0, TIM_MR0_INT);
-}
+    PWM_Init(LPC_PWM1, PWM_MODE_TIMER, &PWMConfig);
 
-void configurarPWM(void) {
-    // Configuración del pin PWM para el servo
+    // Configurar el período
+    uint32_t periodMatch = 20000; // Período en microsegundos (20 ms para un servo de 50Hz)
+    PWM_MatchUpdate(LPC_PWM1, 0, periodMatch, PWM_MATCH_UPDATE_NOW);
 
-    PINSEL_CFG_Type pinConfig;
-    pinConfig.Portnum = PINSEL_PORT_2;  // Puerto 2
-    pinConfig.Pinnum = PINSEL_PIN_0;   // Pin 2.0
-    pinConfig.Funcnum = PINSEL_FUNC_1; // Configura P2.0 como PWM1.1
-    pinConfig.Pinmode = PINSEL_PINMODE_PULLUP; // Configuración por defecto
-    pinConfig.OpenDrain = PINSEL_PINMODE_NORMAL; // Configuración por defecto
-    PINSEL_ConfigPin(&pinConfig);
+    // Configurar el ancho de pulso para PWM1.1
+    uint32_t pulseMatch = 1500;  // Pulso en microsegundos (1.5 ms para la velocidad de apertura)
+    PWM_MatchUpdate(LPC_PWM1, 1, pulseMatch, PWM_MATCH_UPDATE_NOW);
 
-    // Inicializar el PWM
-    PWM_Init(LPC_PWM1, PWM_MODE_TIMER, NULL); // No se pasa estructura de configuración
+    // Configurar acciones de coincidencia
+    PWM_MATCHCFG_Type MatchConfig;
+    MatchConfig.MatchChannel = 0;  // Selecciona MR0
+    MatchConfig.IntOnMatch = DISABLE;
+    MatchConfig.ResetOnMatch = ENABLE; // Reiniciar el contador en MR0
+    MatchConfig.StopOnMatch = DISABLE;
 
-    // Configurar el período del PWM (20 ms = 50 Hz)
-    PWM_MatchUpdate(LPC_PWM1, 0, 20000, PWM_MATCH_UPDATE_NOW); // Período en MR0
-    PWM_ConfigMatch(LPC_PWM1, &(PWM_MATCHCFG_Type){
-        .MatchChannel = 0,
-        .IntOnMatch = DISABLE,
-        .ResetOnMatch = ENABLE,  // Reiniciar el contador en coincidencia con MR0
-        .StopOnMatch = DISABLE   // Continuar contando
-    });
+    PWM_ConfigMatch(LPC_PWM1, &MatchConfig); // Configurar MR0
+    MatchConfig.ResetOnMatch = DISABLE;     // No reiniciar para MR1
+    PWM_ConfigMatch(LPC_PWM1, &MatchConfig); // Configurar MR1
 
-    // Configurar el canal PWM1.1 para el servo
-    PWM_ChannelConfig(LPC_PWM1, 1, PWM_CHANNEL_SINGLE_EDGE); // Canal 1, modo de un solo flanco
-    PWM_MatchUpdate(LPC_PWM1, 1, 1500, PWM_MATCH_UPDATE_NOW);  // Pulso inicial (1.5 ms)
-    PWM_ConfigMatch(LPC_PWM1, &(PWM_MATCHCFG_Type){
-        .MatchChannel = 1,
-        .IntOnMatch = DISABLE,
-        .ResetOnMatch = DISABLE,
-        .StopOnMatch = DISABLE
-    });
-
-    // Habilitar el canal PWM1.1
+    // Habilitar PWM1.1
     PWM_ChannelCmd(LPC_PWM1, 1, ENABLE);
 
-    // Iniciar el contador del PWM
+    // Habilitar el PWM y el contador
+    PWM_ResetCounter(LPC_PWM1);
     PWM_CounterCmd(LPC_PWM1, ENABLE);
-
-    // Habilitar el PWM
     PWM_Cmd(LPC_PWM1, ENABLE);
 }
 
@@ -87,47 +82,57 @@ void establecerAnguloServo(uint8_t angulo) {
     PWM_MatchUpdate(LPC_PWM1, 1, anchoPulso, PWM_MATCH_UPDATE_NOW);
 }
 
-void configurarADC(void) {
+void configurarADC() {
     // Configuración del ADC para el nivel de batería y el sensor LM35
     PINSEL_CFG_Type pinConfig;
+
+    // P0.23 como entrada ADC para el nivel de batería
     pinConfig.Portnum = PINSEL_PORT_0;
-    pinConfig.Pinnum = PINSEL_PIN_23; // P0.23 como entrada ADC para nivel de batería
-    pinConfig.Funcnum = PINSEL_FUNC_1;
+    pinConfig.Pinnum = PINSEL_PIN_23;
+    pinConfig.Funcnum = PINSEL_FUNC_1;  // Función ADC
     PINSEL_ConfigPin(&pinConfig);
 
-    pinConfig.Pinnum = PINSEL_PIN_24; // P0.24 como entrada ADC para temperatura
+    // P0.24 como entrada ADC para el sensor de temperatura LM35
+    pinConfig.Pinnum = PINSEL_PIN_24;
     PINSEL_ConfigPin(&pinConfig);
 
-    ADC_Init(LPC_ADC, 200000); // Inicializa el ADC con frecuencia de 200 kHz
-    ADC_ChannelCmd(LPC_ADC, CANAL_ADC_BATERIA, ENABLE);
-    ADC_ChannelCmd(LPC_ADC, CANAL_ADC_TEMPERATURA, ENABLE);
+    // Inicializa el ADC con frecuencia de 200 kHz
+    ADC_Init(LPC_ADC, 200000);
+
+    // Habilitar los canales correspondientes para los sensores
+    ADC_ChannelCmd(LPC_ADC, 0, ENABLE);  // Canal 0 para la batería (P0.23)
+    ADC_ChannelCmd(LPC_ADC, 1, ENABLE);  // Canal 1 para la temperatura (P0.24)
+
+    // Habilitar la interrupción de la conversión completa del ADC
+    ADC_IntConfig(LPC_ADC, ADC_ADINTEN0, ENABLE);
+    ADC_IntConfig(LPC_ADC, ADC_ADINTEN1, ENABLE);
+
+    // Habilitar la interrupción del ADC en el NVIC
+    NVIC_EnableIRQ(ADC_IRQn);
 }
 
-void configurarUART(void) {
+void configurarUART() {
     // Configuración de UART para transmisión de datos
     PINSEL_CFG_Type pinConfig;
     pinConfig.Portnum = PINSEL_PORT_0;
-    pinConfig.Pinnum = PINSEL_PIN_2;
-    pinConfig.Funcnum = PINSEL_FUNC_1;
+    pinConfig.Pinnum = PINSEL_PIN_0;
+    pinConfig.Funcnum = PINSEL_FUNC_2;
     PINSEL_ConfigPin(&pinConfig);
 
-    pinConfig.Pinnum = PINSEL_PIN_3;
-    PINSEL_ConfigPin(&pinConfig);
-
-    UART_CFG_Type UARTConfigStruct;
-    UARTConfigStruct.Baud_rate = UART_BAUD_RATE;
-    UARTConfigStruct.Parity = UART_PARITY_NONE;
-    UARTConfigStruct.Databits = UART_DATABIT_8;
-    UARTConfigStruct.Stopbits = UART_STOPBIT_1;
-    UART_Init(LPC_UART3, &UARTConfigStruct);
+    UART_CFG_Type UARTConfig;
+    UARTConfig.Baud_rate = UART_BAUD_RATE;
+    UARTConfig.Parity = UART_PARITY_NONE;
+    UARTConfig.Databits = UART_DATABIT_8;
+    UARTConfig.Stopbits = UART_STOPBIT_1;
+    UART_Init(LPC_UART3, &UARTConfig);
     UART_TxCmd(LPC_UART3, ENABLE);
 }
 
-void configurarTemporizador(void) {
+void configurarTemporizador() {
     // Configuración del temporizador para interrupción cada 30 segundos
     TIM_TIMERCFG_Type configuracionTemporizador;
     configuracionTemporizador.PrescaleOption = TIM_PRESCALE_USVAL;
-    configuracionTemporizador.PrescaleValue = 1000000; // 1 segundo por tick
+    configuracionTemporizador.PrescaleValue = 1000; // 1ms
 
     TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &configuracionTemporizador);
     TIM_MATCHCFG_Type configuracionMatch;
@@ -135,43 +140,62 @@ void configurarTemporizador(void) {
     configuracionMatch.IntOnMatch = ENABLE;
     configuracionMatch.ResetOnMatch = ENABLE;
     configuracionMatch.StopOnMatch = DISABLE;
-    configuracionMatch.MatchValue = 30; // 30 segundos
+    configuracionMatch.ExtMatchOutputType = TIM_EXTMATCH_NOTHING;
+    configuracionMatch.MatchValue = 30000; // 30 segundos
 
     TIM_ConfigMatch(LPC_TIM0, &configuracionMatch);
     NVIC_EnableIRQ(TIMER0_IRQn); // Habilita la interrupción del temporizador
     TIM_Cmd(LPC_TIM0, ENABLE); // Activa el temporizador
 }
 
-void configurarDMA(void) {
-    // Configuración básica del DMA
-    GPDMA_Channel_CFG_Type DMAConfig;
-    DMAConfig.ChannelNum = 0;
-    DMAConfig.SrcMemAddr = (uint32_t)&LPC_ADC->ADGDR;
-    DMAConfig.DstMemAddr = (uint32_t)&LPC_UART3->THR;
-    DMAConfig.TransferSize = 2;
-    DMAConfig.TransferWidth = GPDMA_WIDTH_WORD;
-    DMAConfig.TransferType = GPDMA_TRANSFERTYPE_P2M;
-    GPDMA_Setup(&DMAConfig);
+void configurarBoton() {
+
+    // Configuración del pin P2.10 como eint
+    PINSEL_CFG_Type PinConfig;
+    PinConfig.Funcnum = 1;       // Función eint
+    PinConfig.OpenDrain = PINSEL_PINMODE_NORMAL;
+    PinConfig.Pinmode = PINSEL_PINMODE_PULLUP;
+    PinConfig.Portnum = 2;       // Puerto 2
+    PinConfig.Pinnum = 10;        // Pin 10
+    PINSEL_ConfigPin(&PinConfig);
+
+    GPIO_SetDir(PUERTO_BOTON, (1 << PIN_BOTON), 0);
+    GPIO_IntCmd(PUERTO_BOTON, (1 << PIN_BOTON), 0);
+    GPIO_ClearInt(PUERTO_BOTON, (1 << PIN_BOTON));
+    NVIC_EnableIRQ(EINT3_IRQn);
 }
 
-void configurarBoton(void) {
-    // Configura el pin como entrada
-    GPIO_SetDir(PUERTO_BOTON, (1 << PIN_BOTON), 0); // Cambié GPIO_INPUT por GPIO_MODE_INPUT
+void configurarDMA() {
+    // Inicialización del DMA
+    GPDMA_Init();
 
-    // Configura la interrupción en flanco ascendente (cuando el botón es presionado)
-    GPIO_IntCmd(PUERTO_BOTON, (1 << PIN_BOTON), ENABLE);  // Configura la interrupción en el pin
-    GPIO_ClearInt(PUERTO_BOTON, (1 << PIN_BOTON));        // Limpia la interrupción
+    // Configurar la fuente y destino del DMA
+    // Canal de DMA 0
+    GPDMA_Channel_CFG_Type dmaCfg;
+    dmaCfg.ChannelNum = 0;  // Usamos el canal 0 del DMA
+    dmaCfg.TransferSize = 1;  // Transfiere 8 bits
+    dmaCfg.TransferType = GPDMA_TRANSFERTYPE_P2P; //Perif a perif
+    dmaCfg.TransferWidth = GPDMA_WIDTH_WORD; // Configurar como palabra de 32 bits
+    dmaCfg.SrcConn = GPDMA_CONN_ADC; // Fuente del periférico (ADC)
+    dmaCfg.DstConn = GPDMA_CONN_UART1_Tx; // Destino UART
 
-    // Habilita la interrupción del GPIO
-    NVIC_EnableIRQ(EINT3_IRQn); // En LPC1769, la interrupción para los pines GPIO se maneja con EINT3
+    // Configuración del canal DMA para la transferencia de ADC a UART
+    GPDMA_Setup(&dmaCfg);
+
+    NVIC_EnableIRQ(DMA_IRQn);         // Habilitar la interrupción de DMA
+}
+
+void TIMER0_IRQHandler(void) {
+    // Inicia una conversión de ADC y habilita el DMA
+    ADC_StartCmd(LPC_ADC, ADC_START_NOW);
+    // Limpia la interrupción del temporizador
+    TIM_ClearIntPending(LPC_TIM0, TIM_MR0_INT);
 }
 
 void EINT3_IRQHandler(void) {
-    // Verifica si la interrupción es por el pin configurado
-    if (GPIO_GetIntStatus(PUERTO_BOTON, PIN_BOTON, 0) != 0) { // Cambié GPIO_INT_RISING a GPIO_INT_RISING_EDGE
-        // Realiza la acción deseada, por ejemplo, cambiar el ángulo del servo
+    if (GPIO_GetIntStatus(PUERTO_BOTON, PIN_BOTON, 0) != 0) {
         static uint8_t anguloActual = 0;
-        static int direccion = 1; // 1 para avanzar, -1 para retroceder
+        static int direccion = 1;
 
         if (anguloActual < ANGULO_MAXIMO && direccion == 1) {
             anguloActual += PASO_ANGULO;
@@ -188,20 +212,32 @@ void EINT3_IRQHandler(void) {
         }
 
         direccion = ((GPIO_ReadValue(PUERTO_BOTON) & (1 << PIN_BOTON)) == 0) ? 1 : -1;
-        GPIO_ClearInt(PUERTO_BOTON, (1 << PIN_BOTON));  // Limpiar la bandera de interrupción
+        GPIO_ClearInt(PUERTO_BOTON, (1 << PIN_BOTON));
+    }
+}
+
+void ADC_IRQHandler(void) {
+    // Verificar cuál canal generó la interrupción
+    if (ADC_ChannelGetStatus(LPC_ADC, CANAL_ADC_BATERIA, ADC_DATA_DONE)) {
+        // Lee el valor convertido del canal de batería
+        uint16_t valorBateria = ADC_ChannelGetData(LPC_ADC, CANAL_ADC_BATERIA);
+        dmaBuffer[0] = valorBateria; // Guarda en el buffer DMA
+    }
+    if (ADC_ChannelGetStatus(LPC_ADC, CANAL_ADC_TEMPERATURA, ADC_DATA_DONE)) {
+        // Lee el valor convertido del canal de temperatura
+        uint16_t valorTemperatura = ADC_ChannelGetData(LPC_ADC, CANAL_ADC_TEMPERATURA);
+        dmaBuffer[1] = valorTemperatura; // Guarda en el buffer DMA
     }
 }
 
 int main(void) {
-	configurarPWM();
+    configurarPWM();
     configurarBoton();
     configurarADC();
     configurarUART();
     configurarTemporizador();
     configurarDMA();
-
-        // se maneja por interrupciones.
     while (1) {
-        __WFI();  // Sleep mode para reducir el uso del procesador
+        __WFI(); // Esperar interrupción
     }
 }
